@@ -1,0 +1,141 @@
+# DIDの応用例: Card and Krueger (1994) の研究
+
+Card, David & Krueger, Alan B, 1994. "Minimum Wages and Employment: A Case Study of the Fast-Food Industry in New Jersey and Pennsylvania," American Economic Review, American Economic Association, vol. 84(4), pages 772-793
+
+仮説：最低賃金の引き上げは、雇用に対してマイナスの影響を持つ。
+
+Card and Krueger (1994) は、1992年にアメリカのニュージャージー州 (NJ) で最低時給が 4.25ドルから5.05ドルに上昇したのに対し、隣接するペンシルバニア州 (PA) では最低時給の上昇がなかった事実を利用して、分析を行った。
+
+## 準備
+
+```{r}
+library(data.table)
+library(dplyr)
+library(tidyr)
+```
+
+## データ
+
+データは、著者の一人である [David Card 先生のウェブサイト](https://davidcard.berkeley.edu/)で公開されている（前処理が必要）。
+
+前処理済みデータの入手：
+
+```{r}
+data=fread("https://raw.githubusercontent.com/kakyo1515/did_analysis/main/did_data.csv")
+```
+
+`wage_before`: 処置前の最低賃金
+
+`wage_after`: 処置後の最低賃金
+
+`fulltime_before`: 処置前のフルタイム当量の雇用 (FTE)[^did_code-1]
+
+[^did_code-1]: フルタイム当量の雇用は、フルタイム労働者数（管理職を含む）にパートタイム労働者数を0.5倍して加えたもの(Card and Krueger, 1994) 。
+
+`fulltime_after`: 処置後のフルタイム当量の雇用 (FTE)
+
+`state`: 地域ダミー (1 if New Jersey; 0 if Pennsylvania)
+
+## 処置の確認
+
+まず、最低時給の上昇が、実際に最低時給を引き上げたかどうかを確認しよう。
+
+そのために、賃金（時給）が5.05ドル未満のファーストフード店の割合を求める。
+
+```{r}
+data %>% 
+  group_by(state) %>% 
+  summarize(before = mean(wage_before < 5.05,na.rm =TRUE),
+            after = mean(wage_after < 5.05,na.rm =TRUE),
+            .groups = "drop") 
+```
+
+処置（NJでの最低時給引き上げ）前には、どちらの州でも大半（9割以上）の労働者の時給が5.05ドル未満である。それに対し、処置後は、処置がなかったPAでの割合に大きな変化がない一方で、処置を受けた NJ では時給が5.05ドル未満なのは0.3%のみであり、基本的には最低時給が守られていることがわかる。つまり、法律上の最低時給の引き上げは、実際に最低時給を引き上げたことが確認できる。
+
+## DID分析：Table 3結果の再現
+
+-   NJ と PA の平均FTEに**平行トレンド**が仮定できるなら、差分の差分によって、最低時給上昇の処置効果を推定することができる。
+
+|                 |   PA   |  NJ   | NJ-PA |
+|:---------------:|:------:|:-----:|:-----:|
+| 処置前の平均FTE |  23.3  | 20.44 | -2.89 |
+| 処置後の平均FTE | 21.147 | 21.03 | -0.14 |
+|  平均FTEの変化  | -2.16  | 0.59  | 2.75  |
+
+![](figure.png){width="482"}
+
+### 処置前の平均FTE
+
+|                 |  PA  |  NJ   | NJ-PA |
+|:---------------:|:----:|:-----:|:-----:|
+| 処置前の平均FTE | 23.3 | 20.44 | -2.89 |
+
+```{r}
+results <- data %>% group_by(state) %>% # group_by the treatment variable
+  dplyr::select(state, fulltime_before) %>% # only keep variabel of interest
+  summarize_all(mean, na.rm = TRUE) 
+
+results <- bind_rows(results, results[2,]-results[1,])
+results$group<- c("Control (Pennsylvania)", "Treatment (New Jersey)", "Difference")
+results
+```
+
+### 処置後の平均FTE
+
+|                 |   PA   |  NJ   | NJ-PA |
+|:---------------:|:------:|:-----:|:-----:|
+| 処置後の平均FTE | 21.147 | 21.03 | -0.14 |
+
+```{r}
+results2 <- data %>% group_by(state) %>% # group_by the treatment variable
+  dplyr::select(state, fulltime_after) %>% # only keep variabel of interest
+  summarize_all(mean, na.rm = TRUE)  # aggregate/summarize data
+
+
+results2 <- bind_rows(results2, results2[2,]-results2[1,])
+results2$group<- c("Control (Pennsylvania)", "Treatment (New Jersey)", "Difference")
+results2
+```
+
+### 平均FTEの変化
+
+|               |  PA   |  NJ  | NJ-PA |
+|:-------------:|:-----:|:----:|:-----:|
+| 平均FTEの変化 | -2.16 | 0.59 | 2.75  |
+
+```{r}
+did_result = results2[,1]
+did_result[,2] = results2[,2]-results[,2]
+did_result[,3]=c("Control (Pennsylvania)", "Treatment (New Jersey)", "Difference")
+did_result
+```
+
+## 回帰分析によるDID の推定
+
+DIDによる推定値を、回帰分析によって得る方法を考えよう。 DID回帰のために必要なのは、処置群を表すダミー変数D、処置後を表すダミー変数Pそれらの交差項である。 ここまで使ってきたデータは横長（wide: 処置前と処置後の結果変数の値が異なる列にある）なので、`pivot_longer()` で縦長 (long) に変換し、必要な変数を作る。
+
+```{r}
+data_long <- data %>% 
+  dplyr::select(state, starts_with("fulltime_")) %>% 
+  pivot_longer(cols = starts_with("fulltime"),
+               names_to = "time",
+               names_prefix = "fulltime_",
+               values_to = "fulltime") %>% 
+  mutate(D = state,
+         P = ifelse(time == "after", 1, 0))
+```
+
+```{r}
+did_fit00 <- lm(fulltime ~ D * P, data = data_long)
+did_fit00
+```
+
+得られた推定値のうち、D:P（DとP交差項）の係数が、DIDによる推定値（先ほど計算した差の差の値と同じ）であることがわかる。このように、DID推定値は回帰分析によって得ることができる。
+
+## 分析の結果
+
+結果: 最低賃金の上昇が平均のフルタイム当量の雇用 (FTE)を+2.75増加させると推定している。
+
+結論: 最低賃金の上昇が雇用にマイナスの影響を持つことは認められない。
+
+理由: 企業は最低賃金の上昇によるコストの上昇をリストラではなく、価格に転嫁することで対応した。
